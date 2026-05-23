@@ -81,10 +81,13 @@ resource "aws_iam_role_policy" "ecs_task_bedrock" {
         "bedrock:InvokeModelWithResponseStream",
         "bedrock:Converse"  # dashboard/app.py uses bedrock.converse()
       ]
-      # us.anthropic.claude-sonnet-4-6 is a cross-region inference profile,
-      # not a foundation model — it requires account ID in the ARN.
+      # Cross-region inference profiles require TWO resource ARNs:
+      # 1. The inference profile itself (account-scoped, specific region)
+      # 2. The underlying foundation model (no account ID, wildcard region)
+      #    Bedrock checks both when routing through a cross-region profile.
       Resource = [
-        "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-sonnet-4-6"
+        "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-sonnet-4-6",
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6"
       ]
     }]
   })
