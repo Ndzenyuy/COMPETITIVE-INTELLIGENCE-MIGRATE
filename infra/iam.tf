@@ -78,11 +78,13 @@ resource "aws_iam_role_policy" "ecs_task_bedrock" {
       Effect = "Allow"
       Action = [
         "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream"
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse"  # dashboard/app.py uses bedrock.converse()
       ]
-      # Scoped to Claude Sonnet used by both agent and dashboard
+      # us.anthropic.claude-sonnet-4-6 is a cross-region inference profile,
+      # not a foundation model — it requires account ID in the ARN.
       Resource = [
-        "arn:aws:bedrock:${var.aws_region}::foundation-model/us.anthropic.claude-sonnet-4-6"
+        "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-sonnet-4-6"
       ]
     }]
   })
