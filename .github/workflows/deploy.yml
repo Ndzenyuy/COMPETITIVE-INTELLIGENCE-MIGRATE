@@ -12,7 +12,7 @@ permissions:
 
 env:
   AWS_REGION:      us-east-1
-  TF_VERSION:      1.6.0
+  TF_VERSION:      1.10.0
   ECR_REPOSITORY:  ci-prod   # must match var.project_name + "-" + var.environment
 
 jobs:
