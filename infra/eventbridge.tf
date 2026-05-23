@@ -27,12 +27,10 @@ resource "aws_cloudwatch_event_target" "agent_task" {
     task_count          = 1
     launch_type         = "FARGATE"
 
-    # Run in a private subnet — outbound goes through NAT to reach
-    # Bedrock and DuckDuckGo, same as the dashboard task
     network_configuration {
-      subnets          = aws_subnet.private[*].id
+      subnets          = aws_subnet.public[*].id
       security_groups  = [aws_security_group.ecs.id]
-      assign_public_ip = false
+      assign_public_ip = true
     }
   }
 }

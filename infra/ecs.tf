@@ -181,9 +181,9 @@ resource "aws_ecs_service" "dashboard" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = false  # traffic enters via ALB; NAT handles outbound
+    assign_public_ip = true  # public IP replaces NAT gateway for outbound traffic
   }
 
   load_balancer {

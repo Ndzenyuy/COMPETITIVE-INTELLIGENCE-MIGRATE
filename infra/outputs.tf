@@ -38,9 +38,9 @@ output "agent_task_definition_arn" {
   value       = aws_ecs_task_definition.agent.arn
 }
 
-output "private_subnet_ids" {
-  description = "Private subnet IDs — used to launch migration and agent tasks"
-  value       = join(",", aws_subnet.private[*].id)
+output "public_subnet_ids" {
+  description = "Public subnet IDs — used to launch ECS tasks (dashboard, agent, migration)"
+  value       = join(",", aws_subnet.public[*].id)
 }
 
 output "ecs_security_group_id" {
