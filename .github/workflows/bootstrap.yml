@@ -1,0 +1,97 @@
+name: Bootstrap (run once)
+
+# This workflow solves the chicken-and-egg problem:
+# The main deploy.yml uses OIDC to authenticate with AWS, but the OIDC provider
+# and IAM role must exist in AWS before OIDC can work.
+#
+# This workflow runs ONCE using temporary AWS access keys to:
+#   1. Apply only the OIDC provider and GitHub Actions IAM role
+#   2. Print the role ARN so you can add it as a GitHub secret
+#
+# After this succeeds:
+#   - Add AWS_ROLE_ARN (from the job summary) as a GitHub secret
+#   - You can delete the AWS_BOOTSTRAP_KEY_ID / AWS_BOOTSTRAP_SECRET_KEY secrets
+#   - All future deployments use deploy.yml with OIDC — no access keys needed
+#
+# GitHub secrets required for THIS workflow only:
+#   AWS_BOOTSTRAP_KEY_ID     — access key for an IAM user with AdministratorAccess
+#   AWS_BOOTSTRAP_SECRET_KEY — secret key for the same IAM user
+#   TF_VAR_DB_PASSWORD       — RDS master password (also used by deploy.yml)
+
+on:
+  workflow_dispatch:  # manual trigger only — run once from GitHub Actions UI
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION:  us-east-1
+  TF_VERSION:  1.06.0
+
+jobs:
+  bootstrap:
+    name: Bootstrap AWS Infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. AWS credentials (static keys — bootstrap only) ─────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_BOOTSTRAP_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_BOOTSTRAP_SECRET_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      # ── 3. Terraform setup ──────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false  # cleaner output for parsing role ARN
+
+      # ── 5. Terraform Init ────────────────────────────────────────────────────
+      # Backend is fully configured in infra/main.tf — no -backend-config flags needed.
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -input=false
+
+      # ── 6. Apply ONLY the OIDC provider and GitHub Actions role ──────────────
+      # -target limits the apply to just these four resources.
+      # Everything else (VPC, RDS, ECS, etc.) is deployed by deploy.yml.
+      - name: Create OIDC provider and GitHub Actions IAM role
+        working-directory: infra
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+          TF_VAR_github_repo: ${{ github.repository }}
+        run: |
+          terraform apply \
+            -target=aws_iam_openid_connect_provider.github_actions \
+            -target=aws_iam_role.github_actions \
+            -target=aws_iam_role_policy_attachment.github_actions_power_user \
+            -target=aws_iam_role_policy.github_actions_iam \
+            -auto-approve \
+            -input=false
+
+      # ── 7. Print role ARN to job summary ─────────────────────────────────────
+      - name: Output GitHub Actions role ARN
+        working-directory: infra
+        run: |
+          ROLE_ARN=$(terraform output -raw github_actions_role_arn)
+
+          echo "## Bootstrap Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Add the following as GitHub repository secrets:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret name | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`AWS_ROLE_ARN\` | \`${ROLE_ARN}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`TF_VAR_DB_PASSWORD\` | *(already set)* |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Then go to **Settings → Secrets → Actions** in this repo and add \`AWS_ROLE_ARN\`." >> $GITHUB_STEP_SUMMARY
+          echo "After that, push to \`main\` to trigger the full deployment via \`deploy.yml\`." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "You can now delete the \`AWS_BOOTSTRAP_KEY_ID\` and \`AWS_BOOTSTRAP_SECRET_KEY\` secrets." >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,161 @@
+import sys
+import os
+
+# Add project root to path so imports work
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import json
+import boto3
+from scraper.fetch import fetch_article
+from extractor.extract import extract_signals
+from db.client import save_insight, query_insights
+from agent.tools import TOOLS
+from ddgs import DDGS  # pip install ddgs
+
+# Initialize Anthropic client
+# NOTE: You'll need to change this to use Bedrock instead
+# client = Anthropic()
+
+# Initialize Bedrock client
+bedrock = boto3.client(
+    'bedrock-runtime',
+    region_name='us-east-1'  # Change to your region if needed
+)
+
+def search_web(query):
+    """
+    Search the web using DuckDuckGo.
+    
+    Args:
+        query: str — search query
+    
+    Returns:
+        list of dicts — each dict has 'title' and 'url'
+    """
+    results = []
+    with DDGS() as ddgs:
+        for r in ddgs.text(query, max_results=5):
+            results.append({"title": r["title"], "url": r["href"]})
+    return results
+
+def _dispatch_tool(tool_name, tool_input):
+    """
+    Route a tool call to its implementation.
+    
+    Args:
+        tool_name: str — name of the tool Claude called
+        tool_input: dict — parameters Claude provided
+    
+    Returns:
+        str or dict — result to send back to Claude
+    """
+    if tool_name == "search_web":
+        results = search_web(tool_input["query"])
+        return json.dumps(results)
+    
+    elif tool_name == "fetch_page":
+        text = fetch_article(tool_input["url"])
+        return text if text else "Failed to fetch page"
+    
+    elif tool_name == "extract_signals":
+        signals = extract_signals(tool_input["article_text"], tool_input["competitor"])
+        return json.dumps(signals)
+    
+    elif tool_name == "save_insight":
+        insight_id = save_insight(
+            competitor=tool_input["competitor"],
+            signal_type=tool_input["signal_type"],
+            title=tool_input["title"],
+            description=tool_input["description"],
+            source_url=tool_input["source_url"],
+            confidence=tool_input["confidence"]
+        )
+        return f"Saved insight {insight_id}"
+    
+    else:
+        return f"Unknown tool: {tool_name}"
+
+def run_agent(competitor_name, max_iterations=10):
+    """
+    Run the agentic loop: Claude decides what to search, fetches, extracts, saves.
+    
+    Args:
+        competitor_name: str — e.g., "Stripe", "PayPal"
+        max_iterations: int — safety limit to prevent infinite loops
+    
+    Returns:
+        dict — summary of what was found and saved
+    """
+    messages = [
+        {
+            "role": "user",
+            "content": f"Research {competitor_name} and find recent competitive intelligence signals. Search for news, pricing changes, product launches, and partnerships. Extract and save all relevant signals you find."
+        }
+    ]
+    insights_saved = 0
+
+    for _ in range(max_iterations):
+        response = bedrock.invoke_model(
+            modelId="us.anthropic.claude-sonnet-4-6",
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 8192,
+                "system": "You are a competitive intelligence analyst. Research competitors by searching the web, fetching articles, extracting signals, and saving insights. Be thorough but efficient.",
+                "tools": TOOLS,
+                "messages": messages
+            })
+        )
+
+        response_body = json.loads(response["body"].read())
+        stop_reason = response_body["stop_reason"]
+        content = response_body["content"]
+
+        # Append Claude's response to the conversation
+        messages.append({"role": "assistant", "content": content})
+
+        # If Claude is done, break
+        if stop_reason == "end_turn":
+            break
+
+        # Process tool calls
+        if stop_reason == "tool_use":
+            tool_results = []
+            for block in content:
+                if block["type"] == "tool_use":
+                    print(f"Tool call: {block['name']}({block['input']})")
+                    result = _dispatch_tool(block["name"], block["input"])
+                    if block["name"] == "save_insight":
+                        insights_saved += 1
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": str(result)
+                    })
+
+            messages.append({"role": "user", "content": tool_results})
+
+    # # Extract final text summary from last assistant message
+    # summary_text = ""
+    # for block in messages[-1]["content"]:
+    #     if isinstance(block, dict) and block.get("type") == "text":
+    #         summary_text = block["text"]
+    #         break
+
+    # NEW: Search backwards through messages for the last text block
+    for msg in reversed(messages):
+        if msg["role"] == "assistant":
+            for block in msg["content"]:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    summary_text = block["text"]
+                    break
+            if summary_text:
+                break
+
+    return {"competitor": competitor_name, "insights_saved": insights_saved, "summary": summary_text}
+
+if __name__ == "__main__":
+    # Test: run agent on Stripe
+    results = run_agent("Stripe")
+    print(json.dumps(results, indent=2))

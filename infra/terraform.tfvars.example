@@ -1,0 +1,40 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit real secrets.
+
+project_name = "ci"
+environment  = "prod"
+aws_region   = "us-east-1"
+
+# Networking
+availability_zones   = ["us-east-1a", "us-east-1b"]
+vpc_cidr             = "10.0.0.0/16"
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24"]
+
+# Database — also set as TF_VAR_db_password in CI/CD
+db_name           = "competitive_intelligence"
+db_username       = "postgres"
+db_password       = "CHANGE_ME_strong_password_here"
+db_instance_class = "db.t3.micro"
+
+# ECS sizing
+dashboard_cpu    = 512
+dashboard_memory = 1024
+agent_cpu        = 1024
+agent_memory     = 2048
+
+# Agent schedule — every Monday at 9am UTC
+agent_schedule       = "cron(0 9 ? * MON *)"
+agent_max_iterations = 8
+
+# HTTPS — leave empty to start with HTTP, add after getting an ACM cert
+certificate_arn = ""
+
+# Alerting — set to receive CloudWatch alarm emails
+alert_email = "you@example.com"
+
+# CI/CD — your GitHub repo in owner/repo format
+github_repo = "your-username/competitive-intelligence-migrate"
+
+# Image tag — overridden by CI/CD to sha-<git-sha>, leave as "latest" for local runs
+image_tag = "latest"

@@ -1,0 +1,25 @@
+Extract business signals from the article below. Look for:
+1. Pricing changes (new price, discount, tier launch, fee change)
+2. Feature launches (new capability, product release, integration)
+3. Partnerships (new partner announced, integration, acquisition)
+4. Sentiment (positive momentum, layoffs, executive change, controversy)
+5. Other (anything else relevant to competitive strategy)
+
+For each signal, return:
+{
+  "signal_type": "pricing" | "feature_launch" | "partnership" | "sentiment" | "other",
+  "title": "short headline",
+  "description": "2-3 sentences explaining the signal",
+  "confidence": 0.0-1.0
+}
+
+Return only valid JSON in this format:
+{
+  "signals": [
+    { "signal_type": "...", "title": "...", "description": "...", "confidence": ... },
+    ...
+  ]
+}
+
+Article:
+{article_text}
