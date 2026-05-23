@@ -1,23 +1,16 @@
 # ─── GitHub Actions OIDC Provider ────────────────────────────────────────────
-# Allows GitHub Actions to assume an AWS IAM role without storing static
-# access keys as GitHub secrets. The OIDC token proves the job is running
-# in your specific repository before AWS issues temporary credentials.
+# Looks up the existing GitHub OIDC provider (only one is allowed per AWS account).
+# If it doesn't exist yet, the resource block below creates it.
+# On first run in a fresh account, comment out the data source and let the
+# resource create it; on subsequent runs the import step in bootstrap.yml
+# ensures Terraform manages the existing one without trying to recreate it.
 
-resource "aws_iam_openid_connect_provider" "github_actions" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
+data "aws_iam_openid_connect_provider" "github_actions_existing" {
+  url = "https://token.actions.githubusercontent.com"
+}
 
-  # Thumbprints for the GitHub OIDC TLS certificate chain.
-  # These are stable but can be updated via:
-  # openssl s_client -servername token.actions.githubusercontent.com \
-  #   -connect token.actions.githubusercontent.com:443 < /dev/null 2>/dev/null \
-  #   | openssl x509 -fingerprint -noout -sha1
-  thumbprint_list = [
-    "6938fd4d98bab03faadb97b34396831e3780aea1",
-    "1c58a3a8518e8759bf075b76b750d4f2df264fcd"
-  ]
-
-  tags = { Name = "${var.project_name}-${var.environment}-github-oidc" }
+locals {
+  github_oidc_arn = data.aws_iam_openid_connect_provider.github_actions_existing.arn
 }
 
 # ─── GitHub Actions IAM Role ──────────────────────────────────────────────────
@@ -32,7 +25,7 @@ resource "aws_iam_role" "github_actions" {
     Statement = [{
       Effect = "Allow"
       Principal = {
-        Federated = aws_iam_openid_connect_provider.github_actions.arn
+        Federated = local.github_oidc_arn
       }
       Action = "sts:AssumeRoleWithWebIdentity"
       Condition = {

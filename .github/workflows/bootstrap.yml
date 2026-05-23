@@ -69,7 +69,6 @@ jobs:
           TF_VAR_github_repo: ${{ github.repository }}
         run: |
           terraform apply \
-            -target=aws_iam_openid_connect_provider.github_actions \
             -target=aws_iam_role.github_actions \
             -target=aws_iam_role_policy_attachment.github_actions_power_user \
             -target=aws_iam_role_policy.github_actions_iam \
