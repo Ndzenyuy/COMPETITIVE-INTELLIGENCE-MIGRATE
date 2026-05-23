@@ -1,0 +1,116 @@
+name: Destroy Infrastructure
+
+# Manual trigger ONLY — never runs automatically.
+# Tears down all AWS resources managed by Terraform.
+#
+# Pre-destroy steps handle resources Terraform can't delete on its own:
+#   - ECS service scaled to 0 (drains connections before RDS is removed)
+#   - ECR images deleted (ECR repo has no force_delete=true, so images must go first)
+#
+# Requires the same secrets as deploy.yml:
+#   AWS_ROLE_ARN       — OIDC role (created by bootstrap.yml)
+#   TF_VAR_DB_PASSWORD — RDS master password
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm you want to tear down all infrastructure'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION:     us-east-1
+  TF_VERSION:     1.10.0
+  ECR_REPOSITORY: ci-prod   # must match var.project_name + "-" + var.environment
+  ECS_CLUSTER:    ci-prod
+  ECS_SERVICE:    ci-dashboard
+
+jobs:
+  destroy:
+    name: Destroy AWS Infrastructure
+    runs-on: ubuntu-latest
+
+    # Hard-stop if the user didn't type the confirmation word
+    if: github.event.inputs.confirm == 'destroy'
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. AWS credentials via OIDC ─────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      # ── 3. Scale ECS service to 0 ───────────────────────────────────────────
+      # Drains active connections before RDS and EFS are destroyed.
+      # || true so this doesn't fail if the service doesn't exist yet.
+      - name: Scale down ECS service
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --desired-count 0 \
+            --region "$AWS_REGION" || true
+
+          # Wait for tasks to stop (up to 2 minutes)
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --region "$AWS_REGION" || true
+
+      # ── 4. Delete all ECR images ─────────────────────────────────────────────
+      # ECR repository has no force_delete=true, so terraform destroy would fail
+      # if images exist. This step empties the repo first.
+      - name: Delete ECR images
+        run: |
+          IMAGE_IDS=$(aws ecr list-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --query 'imageIds[*]' \
+            --output json)
+
+          if [ "$IMAGE_IDS" != "[]" ]; then
+            aws ecr batch-delete-image \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids "$IMAGE_IDS" \
+              --region "$AWS_REGION"
+            echo "✓ ECR images deleted"
+          else
+            echo "✓ ECR repository already empty"
+          fi
+
+      # ── 5. Terraform setup ───────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -input=false
+
+      # ── 6. Terraform Destroy ─────────────────────────────────────────────────
+      - name: Terraform Destroy
+        working-directory: infra
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+          TF_VAR_github_repo: ${{ github.repository }}
+        run: terraform destroy -auto-approve -input=false
+
+      # ── 7. Summary ──────────────────────────────────────────────────────────
+      - name: Summary
+        run: |
+          echo "## Infrastructure Destroyed ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All Terraform-managed AWS resources have been removed." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The S3 state bucket (\`terraform-backend-65857\`) was **not** deleted — remove it manually if no longer needed." >> $GITHUB_STEP_SUMMARY

@@ -35,16 +35,41 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ── 3. ECR login ─────────────────────────────────────────────────────────
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      # ── 3. Terraform setup ───────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      # ── 4. Build & push Docker image ─────────────────────────────────────────
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -input=false
+
+      # ── 4. Create ECR repository (if it doesn't exist yet) ───────────────────
+      # ECR must exist before the Docker push in step 5. On first deploy this
+      # targeted apply creates only the repo; on subsequent runs it is a no-op.
+      - name: Terraform Apply — ECR only
+        working-directory: infra
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+          TF_VAR_github_repo: ${{ github.repository }}
+        run: |
+          terraform apply \
+            -target=aws_ecr_repository.app \
+            -target=aws_ecr_lifecycle_policy.app \
+            -auto-approve \
+            -input=false
+
+      # ── 5. ECR login + build + push ──────────────────────────────────────────
       # Tags the image with both the git SHA (immutable, for rollbacks) and
       # :latest (for convenience). Terraform uses the SHA tag in the task
       # definition so every push creates a new task definition revision,
       # which triggers an ECS rolling deployment automatically.
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Build, tag and push image to ECR
         id: build
         env:
@@ -59,24 +84,6 @@ jobs:
           docker push $REGISTRY/$ECR_REPOSITORY:latest
           echo "tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      # ── 5. Terraform setup ───────────────────────────────────────────────────
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Terraform Init
-        working-directory: infra
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          terraform init \
-            -backend-config="bucket=ci-terraform-state-${ACCOUNT_ID}" \
-            -backend-config="key=competitive-intelligence/terraform.tfstate" \
-            -backend-config="region=${AWS_REGION}" \
-            -backend-config="dynamodb_table=ci-terraform-locks" \
-            -backend-config="encrypt=true" \
-            -input=false
-
       # ── 6. Terraform Plan ────────────────────────────────────────────────────
       # Passes the git SHA image tag and DB password as TF variables.
       # The plan output is saved to tfplan so Apply uses exactly what was planned.
@@ -85,6 +92,7 @@ jobs:
         working-directory: infra
         env:
           TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+          TF_VAR_github_repo: ${{ github.repository }}
           TF_VAR_image_tag:   ${{ steps.build.outputs.tag }}
         run: terraform plan -out=tfplan -no-color -input=false
 
@@ -96,5 +104,6 @@ jobs:
         working-directory: infra
         env:
           TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+          TF_VAR_github_repo: ${{ github.repository }}
           TF_VAR_image_tag:   ${{ steps.build.outputs.tag }}
         run: terraform apply -auto-approve -input=false tfplan
