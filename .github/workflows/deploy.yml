@@ -107,3 +107,44 @@ jobs:
           TF_VAR_github_repo: ${{ github.repository }}
           TF_VAR_image_tag:   ${{ steps.build.outputs.tag }}
         run: terraform apply -auto-approve -input=false tfplan
+
+      # ── 8. Run database migration ────────────────────────────────────────────
+      # Runs db/migrate.py as a one-off Fargate task inside the private VPC so it
+      # can reach RDS. Uses CREATE TABLE IF NOT EXISTS so it is safe to run on
+      # every deploy — no-op when the schema already exists.
+      - name: Run database migration
+        working-directory: infra
+        run: |
+          CLUSTER=$(terraform output -raw ecs_cluster_name)
+          TASK_DEF=$(terraform output -raw agent_task_definition_arn)
+          SUBNETS=$(terraform output -raw private_subnet_ids)
+          SG=$(terraform output -raw ecs_security_group_id)
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEF" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=DISABLED}" \
+            --overrides '{"containerOverrides":[{"name":"agent","command":["python","db/migrate.py"]}]}' \
+            --query 'tasks[0].taskArn' \
+            --output text \
+            --region "$AWS_REGION")
+
+          echo "Migration task: $TASK_ARN"
+
+          # Wait up to 5 minutes for the task to finish
+          aws ecs wait tasks-stopped \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region "$AWS_REGION"
+
+          # Fail the workflow if the migration container exited non-zero
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text \
+            --region "$AWS_REGION")
+
+          echo "Migration exit code: $EXIT_CODE"
+          [ "$EXIT_CODE" = "0" ] || exit 1
