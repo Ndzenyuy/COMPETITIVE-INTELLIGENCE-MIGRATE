@@ -51,40 +51,85 @@ resource "aws_iam_role_policy_attachment" "github_actions_power_user" {
   policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
 }
 
-# IAM operations Terraform needs to create roles and policies.
+# IAM operations Terraform needs to create/destroy roles and policies.
 # Scoped to exactly the actions used across iam.tf and github_actions.tf.
+#
+# NOTE: During `terraform destroy` Terraform may detach PowerUserAccess from
+# this role before all other resources are gone, leaving the role without S3,
+# ECS, and EC2 permissions mid-run. The two statements below ensure those
+# critical operations remain available via the inline policy throughout.
 resource "aws_iam_role_policy" "github_actions_iam" {
   name = "terraform-iam-operations"
   role = aws_iam_role.github_actions.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Sid    = "TerraformIAMOperations"
-      Effect = "Allow"
-      Action = [
-        "iam:CreateRole",
-        "iam:DeleteRole",
-        "iam:GetRole",
-        "iam:TagRole",
-        "iam:UntagRole",
-        "iam:UpdateAssumeRolePolicy",
-        "iam:AttachRolePolicy",
-        "iam:DetachRolePolicy",
-        "iam:PutRolePolicy",
-        "iam:DeleteRolePolicy",
-        "iam:GetRolePolicy",
-        "iam:ListRolePolicies",
-        "iam:ListAttachedRolePolicies",
-        "iam:PassRole",
-        "iam:CreateOpenIDConnectProvider",
-        "iam:GetOpenIDConnectProvider",
-        "iam:DeleteOpenIDConnectProvider",
-        "iam:TagOpenIDConnectProvider",
-        "iam:ListOpenIDConnectProviders"
-      ]
-      Resource = "*"
-    }]
+    Statement = [
+      {
+        Sid    = "TerraformIAMOperations"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:GetRole",
+          "iam:TagRole",
+          "iam:UntagRole",
+          "iam:UpdateAssumeRolePolicy",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:GetRolePolicy",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+          "iam:PassRole",
+          "iam:CreateOpenIDConnectProvider",
+          "iam:GetOpenIDConnectProvider",
+          "iam:DeleteOpenIDConnectProvider",
+          "iam:TagOpenIDConnectProvider",
+          "iam:ListOpenIDConnectProviders"
+        ]
+        Resource = "*"
+      },
+      {
+        # Terraform state bucket access — must survive PowerUserAccess being
+        # detached from this role during terraform destroy.
+        Sid    = "TerraformStateAccess"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::terraform-backend-65857",
+          "arn:aws:s3:::terraform-backend-65857/*"
+        ]
+      },
+      {
+        # ECS, ECR, and EC2 actions used during destroy that must survive
+        # PowerUserAccess being detached mid-run.
+        Sid    = "TerraformDestroyOperations"
+        Effect = "Allow"
+        Action = [
+          "ecs:DescribeServices",
+          "ecs:UpdateService",
+          "ecs:DeleteService",
+          "ecr:ListImages",
+          "ecr:BatchDeleteImage",
+          "ecr:DescribeRepositories",
+          "ec2:DetachInternetGateway",
+          "ec2:DeleteInternetGateway",
+          "ec2:DisassociateRouteTable",
+          "ec2:DeleteRouteTable",
+          "ec2:DeleteSubnet",
+          "ec2:DeleteVpc"
+        ]
+        Resource = "*"
+      }
+    ]
   })
 }
 

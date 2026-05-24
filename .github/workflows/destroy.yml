@@ -4,8 +4,11 @@ name: Destroy Infrastructure
 # Tears down all AWS resources managed by Terraform.
 #
 # Pre-destroy steps handle resources Terraform can't delete on its own:
-#   - ECS service scaled to 0 (drains connections before RDS is removed)
-#   - ECR images deleted (ECR repo has no force_delete=true, so images must go first)
+#   - ECS service scaled to 0 and tasks fully stopped (releases public IPs so the
+#     IGW can be detached without a DependencyViolation)
+#   - ALB deletion protection disabled (Terraform can't delete a protected ALB)
+#   - RDS deletion protection disabled (Terraform can't delete a protected RDS instance)
+#   - ECR images deleted (ECR repo must be empty before the repository is removed)
 #
 # Requires the same secrets as deploy.yml:
 #   AWS_ROLE_ARN       — OIDC role (created by bootstrap.yml)
@@ -28,6 +31,8 @@ env:
   ECR_REPOSITORY: ci-prod   # must match var.project_name + "-" + var.environment
   ECS_CLUSTER:    ci-prod
   ECS_SERVICE:    ci-prod-dashboard
+  ALB_NAME:       ci-prod-alb
+  RDS_IDENTIFIER: ci-prod-postgres
 
 jobs:
   destroy:
@@ -49,10 +54,12 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
 
-      # ── 3. Scale ECS service to 0 ───────────────────────────────────────────
-      # Drains active connections before RDS and EFS are destroyed.
-      # || true so this doesn't fail if the service doesn't exist yet.
-      - name: Scale down ECS service
+      # ── 3. Scale ECS service to 0 and wait for tasks to stop ────────────────
+      # ECS tasks in public subnets hold public IP addresses. The Internet
+      # Gateway cannot be detached until all those IPs are released, which only
+      # happens after the task ENIs are deleted. We scale to 0, then poll until
+      # no tasks remain rather than relying on `wait services-stable` alone.
+      - name: Scale down ECS service and drain tasks
         run: |
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
@@ -60,22 +67,73 @@ jobs:
             --desired-count 0 \
             --region "$AWS_REGION" || true
 
-          # Wait for tasks to stop (up to 2 minutes)
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --region "$AWS_REGION" || true
+          echo "Waiting for all tasks in cluster to stop..."
+          for i in $(seq 1 24); do
+            TASK_COUNT=$(aws ecs list-tasks \
+              --cluster "$ECS_CLUSTER" \
+              --region "$AWS_REGION" \
+              --query 'length(taskArns)' \
+              --output text 2>/dev/null || echo "0")
+            echo "  Running tasks: $TASK_COUNT"
+            if [ "$TASK_COUNT" = "0" ]; then
+              echo "✓ All tasks stopped"
+              break
+            fi
+            sleep 10
+          done
 
-      # ── 4. Delete all ECR images ─────────────────────────────────────────────
-      # ECR repository has no force_delete=true, so terraform destroy would fail
-      # if images exist. This step empties the repo first.
+      # ── 4. Disable ALB deletion protection ──────────────────────────────────
+      # alb.tf sets enable_deletion_protection = true. Terraform cannot delete
+      # a protected ALB — this step disables protection so terraform destroy works.
+      - name: Disable ALB deletion protection
+        run: |
+          ALB_ARN=$(aws elbv2 describe-load-balancers \
+            --names "$ALB_NAME" \
+            --region "$AWS_REGION" \
+            --query 'LoadBalancers[0].LoadBalancerArn' \
+            --output text 2>/dev/null || echo "None")
+
+          if [ "$ALB_ARN" != "None" ] && [ -n "$ALB_ARN" ]; then
+            aws elbv2 modify-load-balancer-attributes \
+              --load-balancer-arn "$ALB_ARN" \
+              --attributes Key=deletion_protection.enabled,Value=false \
+              --region "$AWS_REGION"
+            echo "✓ ALB deletion protection disabled"
+          else
+            echo "✓ ALB not found, skipping"
+          fi
+
+      # ── 5. Disable RDS deletion protection ──────────────────────────────────
+      # rds.tf sets deletion_protection = true. This step disables it so
+      # terraform destroy can remove the instance.
+      - name: Disable RDS deletion protection
+        run: |
+          STATUS=$(aws rds describe-db-instances \
+            --db-instance-identifier "$RDS_IDENTIFIER" \
+            --region "$AWS_REGION" \
+            --query 'DBInstances[0].DBInstanceStatus' \
+            --output text 2>/dev/null || echo "not-found")
+
+          if [ "$STATUS" != "not-found" ]; then
+            aws rds modify-db-instance \
+              --db-instance-identifier "$RDS_IDENTIFIER" \
+              --no-deletion-protection \
+              --apply-immediately \
+              --region "$AWS_REGION"
+            echo "✓ RDS deletion protection disabled"
+          else
+            echo "✓ RDS instance not found, skipping"
+          fi
+
+      # ── 6. Delete all ECR images ─────────────────────────────────────────────
+      # ECR repository must be empty before Terraform can delete it.
       - name: Delete ECR images
         run: |
           IMAGE_IDS=$(aws ecr list-images \
             --repository-name "$ECR_REPOSITORY" \
             --region "$AWS_REGION" \
             --query 'imageIds[*]' \
-            --output json)
+            --output json 2>/dev/null || echo "[]")
 
           if [ "$IMAGE_IDS" != "[]" ]; then
             aws ecr batch-delete-image \
@@ -87,7 +145,7 @@ jobs:
             echo "✓ ECR repository already empty"
           fi
 
-      # ── 5. Terraform setup ───────────────────────────────────────────────────
+      # ── 7. Terraform setup ───────────────────────────────────────────────────
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -98,7 +156,7 @@ jobs:
         working-directory: infra
         run: terraform init -input=false
 
-      # ── 6. Terraform Destroy ─────────────────────────────────────────────────
+      # ── 8. Terraform Destroy ─────────────────────────────────────────────────
       - name: Terraform Destroy
         working-directory: infra
         env:
@@ -106,7 +164,7 @@ jobs:
           TF_VAR_github_repo: ${{ github.repository }}
         run: terraform destroy -auto-approve -input=false
 
-      # ── 7. Summary ──────────────────────────────────────────────────────────
+      # ── 9. Summary ──────────────────────────────────────────────────────────
       - name: Summary
         run: |
           echo "## Infrastructure Destroyed ✅" >> $GITHUB_STEP_SUMMARY
