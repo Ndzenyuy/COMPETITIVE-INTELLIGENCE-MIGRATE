@@ -8,7 +8,7 @@ resource "aws_lb" "main" {
   subnets            = aws_subnet.public[*].id
 
   # Protects against accidental deletion via console or terraform destroy
-  enable_deletion_protection = true
+  # enable_deletion_protection = true
 
   tags = { Name = "${var.project_name}-${var.environment}-alb" }
 }

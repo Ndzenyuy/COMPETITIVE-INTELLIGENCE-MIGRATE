@@ -59,12 +59,10 @@ resource "aws_db_instance" "postgres" {
   backup_window           = "03:00-04:00"  # UTC, low-traffic window
   maintenance_window      = "mon:04:00-mon:05:00"
 
-  # Snapshots — skip final snapshot for non-prod; set to false in production
-  skip_final_snapshot       = false
-  final_snapshot_identifier = "${var.project_name}-${var.environment}-final-snapshot"
+  skip_final_snapshot = true
 
   # Prevent accidental deletion via terraform destroy
-  deletion_protection = true
+  # deletion_protection = true
 
   tags = { Name = "${var.project_name}-${var.environment}-postgres" }
 }
